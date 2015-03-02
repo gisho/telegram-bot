@@ -3,13 +3,32 @@ https = require("ssl.https")
 URL = require("socket.url")
 json = (loadfile "./libs/JSON.lua")()
 serpent = (loadfile "./libs/serpent.lua")()
+zmq = require "lzmq"
+require "./libs/zhelpers"
 require("./bot/utils")
 
-VERSION = '0.9.3'
+VERSION = '0.8.5'
 
+-- bind to zmq
+context = zmq.context()
+reqclient = context:socket{zmq.REQ, connect = "tcp://localhost:5690"}
+zassert(reqclient, err)
+--publisher, err = context:socket{zmq.PUB, bind = "tcp://*:5563"}
+--publisher, err = context:socket{zmq.PUB, bind = "tcp://*:5563"}
+--zassert(publisher, err)
+sleep (1);
+--local subscriber, err = context:socket{zmq.SUB,
+--  subscribe = "";
+--  connect   = "tcp://localhost:5561";
+--}
+
+--zassert(subscriber, err)
+-- 0MQ is so fast, we need to wait a while
+--sleep (1);
+can_start_sub=false
 function on_msg_receive (msg)
-  vardump(msg)
-
+  --vardump(msg)
+  print(msg.text)
   if msg_valid(msg) == false then
     return
   end
@@ -31,26 +50,27 @@ function on_binlog_replay_end ()
   -- load plugins
   plugins = {}
   load_plugins()
+  print("start coroutine....")
+  if can_start_sub == true then
+      coroutine.resume(co)
+  end
+  --postpone (get_sub, false,5)
 end
 
 function msg_valid(msg)
   -- Dont process outgoing messages
   if msg.out then
-    print("Not valid, msg from us")
     return false
   end
   if msg.date < now then
-    print("Not valid, old msg")
     return false
   end
   if msg.unread == 0 then
-    print("Not valid, readed")
     return false
   end
 end
 
 function do_lex(msg, text)
-  -- Plugins which implements lex.
   for name, desc in pairs(plugins) do
     if (desc.lex ~= nil) then
       result = desc.lex(msg, text)
@@ -63,21 +83,34 @@ function do_lex(msg, text)
   return text
 end
 
--- Where magic happens
 function do_action(msg)
   local receiver = get_receiver(msg)
   local text = msg.text
-
-  if text == nil then
-    -- Not a text message, make text the same as what tg shows so
-    -- we can match on it. Maybe a plugin activated my media type.
-    if msg.media ~= nil then
-      text = '['..msg.media.type..']'
-    end
+  print("received text >> ", msg.text)
+  if msg.text == nil then
+     return ''
   end
+  mark_read(get_receiver(msg), ok_cb, false)
 
-  -- We can't do anything
-  if msg.text == nil then return false end
+  --publisher:sendx(receiver..'||'..msg.from.phone..'||'..msg.text )
+  reqclient:send(receiver..'||'..msg.from.phone..'||'..msg.text) -- send a synchronization request
+  local message = reqclient:recv()   -- wait for synchronization reply
+  if message ~= nil then
+        receiver, phone, resp = message:match("([^|]+)|([^|]+)|([^|]+)")
+        printf ("Received<< receiver:%s,phone:%s,msg:%s \n", receiver, phone, resp)
+        _send_msg(receiver, resp)
+  end
+   --_send_msg(receiver, resp)
+end
+-- Where magic happens
+function olddo_action(msg)
+  local receiver = get_receiver(msg)
+  local text = msg.text
+  if msg.text == nil then
+     -- Not a text message, make text the same as what tg shows so
+     -- we can match on it. The plugin is resposible for handling
+     text = '['..msg.media.type..']'
+  end
 
   msg.text = do_lex(msg, text)
 
@@ -107,7 +140,34 @@ function do_action(msg)
     end
   end
 end
+-- function that receives messages from ussd app
+co = coroutine.create(
+   function ()
+      while true do
+         local message = subscriber:recv()
+         if message ~= nil then
+            receiver, phone, resp = message:match("([^|]+)|([^|]+)|([^|]+)")
+            printf ("Received<< receiver:%s,phone:%s,msg:%s \n", receiver, phone, resp)
+            _send_msg(receiver, resp)
+         end
+         sleep(1)
+      end
 
+   end
+)
+function get_sub()
+      while true do
+         print("waiting for message...")
+         local message = subscriber:recv()
+         if message ~= nil then
+            receiver, phone, resp = message:match("([^|]+)|([^|]+)|([^|]+)")
+            printf ("Received<< receiver:%s,phone:%s,msg:%s \n", receiver, phone, resp)
+            _send_msg(receiver, resp)
+         end
+         sleep(1)
+      end
+
+   end
 -- If text is longer than 4096 chars, send multiple msg.
 -- https://core.telegram.org/method/messages.sendMessage
 function _send_msg( destination, text)
@@ -153,26 +213,8 @@ function create_config( )
   config = {
     enabled_plugins = {
       "9gag",
-      "eur",
-      "echo",
-      "btc",
-      "get",
-      "giphy",
-      "google",
-      "gps",
-      "help",
-      "images",
-      "img_google",
-      "location",
-      "media",
-      "plugins",
-      "set",
-      "stats",
-      "time",
-      "version",
-      "weather",
-      "xkcd",
-      "youtube" },
+      "weather"
+       },
     sudo_users = {our_id}  
   }
   serialize_to_file(config, './data/config.lua')
@@ -224,4 +266,4 @@ end
 -- Start and load values
 our_id = 0
 now = os.time()
-math.randomseed(now)
+--can_start_sub = true
